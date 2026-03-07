@@ -1,1 +1,1 @@
-{"statusCode": 500, "body": "{\"error\": \"An error occurred (ResourceNotFoundException) when calling the InvokeModel operation: This model version has reached the end of its life. Please refer to the AWS documentation for more details.\"}"}
+{"errorMessage": "Unable to import module 'query_mediquery': No module named 'openai'", "errorType": "Runtime.ImportModuleError", "requestId": "", "stackTrace": []}
