@@ -2,4 +2,3 @@ boto3
 pinecone
 python-dotenv
 tqdm
-openai
