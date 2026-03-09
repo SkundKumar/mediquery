@@ -1,4 +1,4 @@
-name: Deploy MediQuery Level 1 Pipeline
+name: Deploy MediQuery Level 2 Pipeline
 
 on:
   push:
@@ -6,7 +6,34 @@ on:
       - main
 
 jobs:
+  # ==========================================
+  # STAGE 1: Continuous Integration (Testing)
+  # ==========================================
+  test-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install pytest
+          pip install -r requirements.txt
+
+      - name: Run PyTest Suite
+        run: |
+          pytest test_engine.py -v
+
+  # ==========================================
+  # STAGE 2: Continuous Deployment (Locked behind Stage 1)
+  # ==========================================
   deploy:
+    needs: test-logic
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
