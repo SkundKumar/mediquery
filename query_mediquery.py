@@ -80,6 +80,10 @@ def lambda_handler(event, context):
         # --- RETURN TO STREAMLIT ---
         return {
             "statusCode": 200,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
             "body": json.dumps({"response": final_answer})
         }
 
@@ -87,5 +91,9 @@ def lambda_handler(event, context):
         print(f"PIPELINE ERROR: {str(e)}")
         return {
             "statusCode": 500,
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*"
+            },
             "body": json.dumps({"error": f"Internal Server Error: {str(e)}"})
         }
