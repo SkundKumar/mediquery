@@ -26,8 +26,10 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run PyTest Suite
-        run: |
-          pytest test_engine.py -v
+        env:
+          PINECONE_API_KEY: "dummy-key-for-testing"
+          MY_AWS_REGION: "us-east-1"
+        run: pytest test_engine.py -v
 
   # ==========================================
   # STAGE 2: Continuous Deployment (Locked behind Stage 1)

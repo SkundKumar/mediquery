@@ -55,13 +55,13 @@ resource "aws_lambda_function" "mediquery_v2_engine" {
   function_name = "mediquery-engine-v2"
   role          = aws_iam_role.mediquery_v2_role.arn
   package_type  = "Image"
-  image_uri     = "YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mediquery:latest" # Update this later in CI/CD
+  image_uri     = "904615840729.dkr.ecr.us-east-1.amazonaws.com/mediquery:latest" # Update this later in CI/CD
   timeout       = 30 # Increased timeout for Vision Processing
   memory_size   = 1024 # Increased memory for image base64 decoding
 
   environment {
     variables = {
-      PINECONE_API_KEY = "dummy-key-update-in-console"
+      PINECONE_API_KEY = "pcsk_6hRe3x_UnfHMeYdDrfwxpB6UKvHQwGnS9bfCBoth6behTjGAJe6i9eTMNkUSeTb5dkssVa"
       MY_AWS_REGION    = "us-east-1"
     }
   }
@@ -84,4 +84,13 @@ resource "aws_lambda_function_url" "mediquery_v2_url" {
 # 5. Output the live URL to the terminal
 output "mediquery_v2_api_url" {
   value = aws_lambda_function_url.mediquery_v2_url.function_url
+}
+
+# 6. Explicitly grant public access to the Function URL
+resource "aws_lambda_permission" "allow_public_url" {
+  statement_id           = "AllowPublicFunctionURLInvoke"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.mediquery_v2_engine.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
 }
