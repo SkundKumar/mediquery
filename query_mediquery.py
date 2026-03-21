@@ -9,38 +9,29 @@ from pinecone import Pinecone
 bedrock = boto3.client(service_name='bedrock-runtime', region_name=os.environ.get("MY_AWS_REGION", "us-east-1"))
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
-# Your Modal GPU endpoint
 MODAL_API_URL = "https://skund-kr--mediquery-custom-brain-mediquerybrain-generate-96c12c.modal.run"
 
 def handler(event, context):
     try:
-        # 1. Parse incoming payload from Streamlit
         body = json.loads(event.get("body", "{}"))
-        user_query = body.get("question", "") # Matches your app.py payload key
+        user_query = body.get("question", "") 
         image_data = body.get("image", None)
         
         vision_text = ""
 
-        # --- PHASE 1: THE EYES (Amazon Nova) ---
+        # PHASE 1: Nova Vision Extraction
         if image_data:
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"image": {"format": "png", "source": {"bytes": base64.b64decode(image_data)}}},
-                    {"text": "Describe the visual medical anomalies in this image. Do not diagnose."}
-                ]
-            }]
+            messages = [{"role": "user", "content": [
+                {"image": {"format": "png", "source": {"bytes": base64.b64decode(image_data)}}},
+                {"text": "Describe the visual medical anomalies in this image."}
+            ]}]
             nova_response = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
             vision_text = nova_response['output']['message']['content'][0]['text']
 
-        # --- PHASE 2: THE MEMORY (Titan + Pinecone) ---
+        # PHASE 2: Pinecone Retrieval (Index: mediquery)
         search_query = user_query.strip()
-        if vision_text:
-            search_query += f" [Visual Context: {vision_text}]"
-            
-        # TITAN FAILSAFE: Prevents crash if input is empty
-        if not search_query.strip():
-            search_query = "general clinical medical guidelines"
+        if vision_text: search_query += f" [Visual Context: {vision_text}]"
+        if not search_query.strip(): search_query = "medical clinical guidelines"
             
         embed_response = bedrock.invoke_model(
             modelId="amazon.titan-embed-text-v2:0",
@@ -50,28 +41,23 @@ def handler(event, context):
         )
         embedding = json.loads(embed_response['body'].read())['embedding']
         
-        # PINECONE INDEX (Corrected to 'mediquery')
+        # MATCHES YOUR PINECONE DASHBOARD
         index = pc.Index("mediquery")
         pc_response = index.query(vector=embedding, top_k=3, include_metadata=True)
         context_text = "\n".join([match['metadata']['text'] for match in pc_response['matches']])
 
-        # --- PHASE 3: THE BRAIN (Modal GPU) ---
-        final_prompt = f"Guidelines:\n{context_text}\n\nVisual Analysis:\n{vision_text}\n\nUser Question:\n{user_query}\n\nDiagnosis/Answer:"
+        # PHASE 3: Modal Brain Call
+        final_prompt = f"Guidelines:\n{context_text}\n\nVision:\n{vision_text}\n\nQuestion:\n{user_query}\n\nDiagnosis:"
         
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
-        
-        # 60 second timeout for the HTTP request to Modal
-        modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=60) 
+        # 120s timeout to allow for the model loading
+        modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=120) 
         custom_answer = json.loads(modal_response.read()).get("diagnosis", "Error reading brain output.")
 
-        # --- RETURN TO STREAMLIT ---
         return {
             "statusCode": 200,
-            "headers": {
-                "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*"
-            },
-            "body": json.dumps({"answer": custom_answer}) # Matches your data.get("answer")
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"answer": custom_answer})
         }
 
     except Exception as e:
