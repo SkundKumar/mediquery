@@ -36,9 +36,16 @@ def handler(event, context):
 
         # --- PHASE 2: THE MEMORY (Titan + Pinecone) ---
         print("PHASE 2: Querying Pinecone...")
-        search_query = user_query
+        
+        # Strip whitespace to prevent empty strings from crashing Titan
+        search_query = user_query.strip()
         if vision_text:
             search_query += f" [Visual Context: {vision_text}]"
+            
+        # BULLETPROOF FAILSAFE: If the query is completely empty, default to this
+        search_query = search_query.strip()
+        if not search_query:
+            search_query = "clinical medical guidelines"
             
         embed_response = bedrock.invoke_model(
             modelId="amazon.titan-embed-text-v2:0",
