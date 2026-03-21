@@ -2,13 +2,8 @@ import modal
 
 app = modal.App("mediquery-custom-brain")
 
-# Added 'peft' to requirements to handle your adapter files
 image = modal.Image.debian_slim(python_version="3.10").pip_install(
-    "torch", 
-    "transformers", 
-    "accelerate",
-    "peft",
-    "fastapi[standard]"
+    "torch", "transformers", "accelerate", "peft", "fastapi[standard]"
 )
 
 BASE_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -26,24 +21,42 @@ class MediQueryBrain:
         print("Loading Base Model...")
         self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
         base_model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL, 
-            torch_dtype=torch.float16, 
-            device_map="auto"
+            BASE_MODEL, torch_dtype=torch.float16, device_map="auto"
         )
-        
-        print("Applying Medical Fine-Tuning Adapter...")
-        # This combines the base brain with your specific medical 'patch'
+        print("Applying Medical Adapter...")
         self.model = PeftModel.from_pretrained(base_model, ADAPTER_MODEL)
-        print("Custom Brain loaded successfully.")
+        print("Brain ready.")
 
     @modal.fastapi_endpoint(method="POST")
     def generate_diagnosis(self, data: dict):
-        prompt = data.get("prompt", "")
-        inputs = self.tokenizer(prompt, return_tensors="pt").to("cuda")
+        raw_prompt = data.get("prompt", "")
         
-        outputs = self.model.generate(**inputs, max_new_tokens=256)
-        answer = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # --- THE HIGH-PRECISION CHAT TEMPLATE ---
+        # 1. Clear system role. 2. Proper stop tokens (</s>). 
+        # 3. Explicit "I don't know" instruction to prevent hallucinations.
+        formatted_prompt = (
+            "<|system|>\n"
+            "You are a medical assistant. Use the provided context tags to answer the question. "
+            "If the information is not in the context, say 'I do not have enough clinical data to answer that.'\n"
+            "</s>\n"
+            f"<|user|>\n{raw_prompt}</s>\n"
+            "<|assistant|>\n"
+        )
+
+        inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to("cuda")
         
-        # Clean up the output so it doesn't repeat the prompt
-        clean_answer = answer.replace(prompt, "").strip()
-        return {"diagnosis": clean_answer}
+        # FACTUAL SETTINGS: Lower temperature (0.2) + Repetition Penalty
+        outputs = self.model.generate(
+            **inputs, 
+            max_new_tokens=300,
+            do_sample=True,
+            temperature=0.2, 
+            top_p=0.9,
+            repetition_penalty=1.2
+        )
+        
+        full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        # Extract only the assistant's answer
+        answer = full_text.split("<|assistant|>")[-1].strip() if "<|assistant|>" in full_text else full_text
+        
+        return {"diagnosis": answer}

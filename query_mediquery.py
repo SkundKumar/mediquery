@@ -5,7 +5,6 @@ import base64
 import urllib.request
 from pinecone import Pinecone
 
-# --- INITIALIZE CLOUD CLIENTS ---
 bedrock = boto3.client(service_name='bedrock-runtime', region_name=os.environ.get("MY_AWS_REGION", "us-east-1"))
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
@@ -16,53 +15,44 @@ def handler(event, context):
         body = json.loads(event.get("body", "{}"))
         user_query = body.get("question", "") 
         image_data = body.get("image", None)
-        # We now accept the format from the frontend (jpeg or png)
-        image_format = body.get("image_format", "png") 
+        image_format = body.get("image_format", "png")
         
-        vision_text = ""
+        vision_text = "No image provided."
 
-        # --- PHASE 1: THE EYES (Amazon Nova) ---
+        # 1. NOVA VISION (Phase 1)
         if image_data:
-            print(f"PHASE 1: Extracting visual context ({image_format})...")
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"image": {"format": image_format, "source": {"bytes": base64.b64decode(image_data)}}},
-                    {"text": "Describe the visual medical anomalies in this image. Do not diagnose."}
-                ]
-            }]
-            nova_response = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
-            vision_text = nova_response['output']['message']['content'][0]['text']
+            messages = [{"role": "user", "content": [
+                {"image": {"format": image_format, "source": {"bytes": base64.b64decode(image_data)}}},
+                {"text": "Describe the medical findings in this scan clearly."}
+            ]}]
+            nova_res = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
+            vision_text = nova_res['output']['message']['content'][0]['text']
 
-        # --- PHASE 2: THE MEMORY (Pinecone) ---
-        search_query = user_query.strip()
-        if vision_text:
-            search_query += f" [Visual Context: {vision_text}]"
-        
-        if not search_query.strip():
-            search_query = "general medical guidelines"
-            
-        embed_response = bedrock.invoke_model(
+        # 2. PINECONE RAG (Phase 2)
+        search_text = f"{user_query} {vision_text}" if image_data else user_query
+        embed_res = bedrock.invoke_model(
             modelId="amazon.titan-embed-text-v2:0",
             contentType="application/json",
             accept="application/json",
-            body=json.dumps({"inputText": search_query})
+            body=json.dumps({"inputText": search_text if search_text.strip() else "medical"})
         )
-        embedding = json.loads(embed_response['body'].read())['embedding']
+        embedding = json.loads(embed_res['body'].read())['embedding']
         
         index = pc.Index("mediquery")
-        pc_response = index.query(vector=embedding, top_k=3, include_metadata=True)
-        context_text = "\n".join([match['metadata']['text'] for match in pc_response['matches']])
+        pc_res = index.query(vector=embedding, top_k=3, include_metadata=True)
+        context_text = "\n\n".join([m['metadata']['text'] for m in pc_res['matches']])
 
-        # --- PHASE 3: THE BRAIN ---
-        # Explicitly telling the model to ignore vision if vision_text is empty
-        vision_block = f"Visual Observation: {vision_text}" if vision_text else "Visual Observation: None provided."
-        
-        final_prompt = f"Guidelines:\n{context_text}\n\n{vision_block}\n\nUser Question:\n{user_query}\n\nDiagnosis:"
+        # --- THE XML STRUCTURED PROMPT ---
+        # This prevents the AI from mixing up visual data with text guidelines.
+        final_prompt = (
+            f"<clinical_guidelines>\n{context_text}\n</clinical_guidelines>\n\n"
+            f"<visual_analysis>\n{vision_text}\n</visual_analysis>\n\n"
+            f"<patient_question>\n{user_query}\n</patient_question>"
+        )
         
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
-        modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=120) 
-        custom_answer = json.loads(modal_response.read()).get("diagnosis", "Error reading brain output.")
+        modal_res = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=120) 
+        custom_answer = json.loads(modal_res.read()).get("diagnosis", "Error reading brain output.")
 
         return {
             "statusCode": 200,
@@ -71,8 +61,4 @@ def handler(event, context):
         }
 
     except Exception as e:
-        return {
-            "statusCode": 500,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-            "body": json.dumps({"error": str(e)})
-        }
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
