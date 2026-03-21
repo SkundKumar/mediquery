@@ -1,5 +1,4 @@
 import modal
-import os
 
 app = modal.App("mediquery-custom-brain")
 
@@ -19,38 +18,40 @@ class MediQueryBrain:
         from peft import PeftModel
         import torch
         
-        print("LOADING: Tokenizer and Base Model...")
+        print("Loading Base Model...")
         self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
         base_model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL, 
-            torch_dtype=torch.float16, 
-            device_map="auto"
+            BASE_MODEL, torch_dtype=torch.float16, device_map="auto"
         )
         
-        print(f"LOADING: Adapter {ADAPTER_MODEL}...")
+        print("Applying Medical Adapter...")
         self.model = PeftModel.from_pretrained(base_model, ADAPTER_MODEL)
-        print("SUCCESS: Brain is online.")
+        print("Brain Ready.")
 
     @modal.fastapi_endpoint(method="POST")
     def generate_diagnosis(self, data: dict):
         import torch
         raw_prompt = data.get("prompt", "")
         
-        # Aggressive direct prompt to stop the 'parrot' behavior
-        system_instr = "You are a direct medical assistant. Answer immediately. Do not repeat the user."
-        formatted_prompt = f"<|system|>\n{system_instr}</s>\n<|user|>\n{raw_prompt}</s>\n<|assistant|>\nThe most likely cause is"
+        # System instructions to enforce brevity and prevent repetition
+        system_instr = "You are a direct medical assistant. Answer immediately. Do not repeat the user's input."
+        
+        # The 'Force-Start' technique for TinyLlama
+        formatted_prompt = (
+            f"<|system|>\n{system_instr}</s>\n"
+            f"<|user|>\n{raw_prompt}</s>\n"
+            f"<|assistant|>\nThe most likely cause is"
+        )
 
-        # FIXED: Explicitly getting input_ids as a tensor to avoid the 'list' error
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt")
         input_ids = inputs.input_ids.to("cuda")
         attention_mask = inputs.attention_mask.to("cuda")
         
-        print("INFERENCE: Generating response...")
         with torch.no_grad():
             outputs = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=100,
+                max_new_tokens=150,
                 do_sample=True,
                 temperature=0.2, 
                 repetition_penalty=1.3 
@@ -58,8 +59,13 @@ class MediQueryBrain:
         
         full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Extract the assistant's answer and cleanup
-        answer = full_text.split("<|assistant|>")[-1].strip()
+        # Parsing logic to extract only the assistant's new response
+        if "<|assistant|>" in full_text:
+            answer = full_text.split("<|assistant|>")[-1].strip()
+        else:
+            answer = full_text.replace(formatted_prompt, "").strip()
+
+        # Final formatting cleanup
         if not answer.lower().startswith("the most likely cause is"):
             answer = "The most likely cause is " + answer
             

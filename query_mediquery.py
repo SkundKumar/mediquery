@@ -5,76 +5,88 @@ import base64
 import urllib.request
 from pinecone import Pinecone
 
-bedrock = boto3.client(service_name='bedrock-runtime', region_name=os.environ.get("MY_AWS_REGION", "us-east-1"))
+# Initialize clients
+bedrock = boto3.client(service_name='bedrock-runtime', region_name="us-east-1")
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+
+# Replace with your actual Modal endpoint URL
 MODAL_API_URL = "https://skund-kr--mediquery-custom-brain-mediquerybrain-generate-96c12c.modal.run"
 
 def handler(event, context):
     try:
         body = json.loads(event.get("body", "{}"))
-        user_query = body.get("question", "").lower()
+        user_query = body.get("question", "").strip()
         image_data = body.get("image", None)
         image_format = body.get("image_format", "png")
         
-        is_medical_scan = False
-        vision_text = "No image provided."
+        vision_text = "No visual data provided."
+        is_clinical_scan = False
 
-        # --- PHASE 1: THE GATEKEEPER (Nova Classification) ---
+        # --- PHASE 1: THE VISION GATE (Nova Classification) ---
         if image_data:
-            print("PHASE 1: Classifying image...")
             messages = [{
                 "role": "user",
                 "content": [
                     {"image": {"format": image_format, "source": {"bytes": base64.b64decode(image_data)}}},
-                    {"text": "Classify this image: Is it a (A) Professional Medical Scan (X-ray/MRI), (B) A casual photo of a body part (skin/face), or (C) A non-medical object/person? Describe the visual facts only."}
+                    {"text": "Is this a clinical medical scan (MRI, X-ray, Pathology slide, or professional clinical close-up)? Answer 'YES' or 'NO' and provide a 1-sentence description."}
                 ]
             }]
-            nova_response = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
-            vision_text = nova_response['output']['message']['content'][0]['text']
-            
-            # If Nova sees a selfie or non-medical, we flag it
-            if "professional medical scan" in vision_text.lower():
-                is_medical_scan = True
+            nova_res = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
+            vision_text = nova_res['output']['message']['content'][0]['text']
+            is_clinical_scan = "YES" in vision_text.upper()
 
-        # --- PHASE 2: CONTEXTUAL PRE-PROCESSING ---
-        # If the user is just 'tired' and it's a selfie, we don't want cancer data.
-        # We only search Pinecone if the query contains 'heavy' medical keywords.
-        medical_keywords = ["pain", "glaucoma", "fever", "infection", "growth", "vision", "syndrome"]
-        is_heavy_query = any(word in user_query for word in medical_keywords) or is_medical_scan
+        # --- PHASE 2: INTENT ROUTING (The 'Anti-Cancer' Filter) ---
+        # Detect if the query is "Heavy" (Clinical) or "Light" (Wellness)
+        heavy_keywords = ["glaucoma", "syndrome", "tumor", "cancer", "pathology", "diagnosis", "med-"]
+        is_heavy_query = any(word in user_query.lower() for word in heavy_keywords) or is_clinical_scan
 
-        context_text = "No relevant clinical guidelines found for this common inquiry."
+        # Define source tiers from MedQuad
+        # Wellness Mode only looks at general sources like MedlinePlus
+        # Clinical Mode opens up specialized sources like NCI (National Cancer Institute)
+        filter_logic = {}
+        if not is_heavy_query:
+            # Metadata filter for Pinecone to only use general sources
+            filter_logic = {"source": {"$in": ["MedlinePlus", "NIH", "NIDDK"]}}
+
+        # --- PHASE 3: METADATA-ANCHORED RAG ---
+        context_text = "No specific clinical guidelines required for this wellness inquiry."
         
-        if is_heavy_query:
-            print("PHASE 2: Fetching targeted clinical context...")
-            embed_res = bedrock.invoke_model(
-                modelId="amazon.titan-embed-text-v2:0",
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps({"inputText": f"{user_query} {vision_text}"})
-            )
-            embedding = json.loads(embed_res['body'].read())['embedding']
-            
-            index = pc.Index("mediquery")
-            # We filter for high confidence scores only (0.8+)
-            pc_res = index.query(vector=embedding, top_k=2, include_metadata=True)
-            
-            matches = [m['metadata']['text'] for m in pc_res['matches'] if m['score'] > 0.82]
-            if matches:
-                context_text = "\n\n".join(matches)
-
-        # --- PHASE 3: DYNAMIC PROMPTING ---
-        # We tell the brain exactly how to behave based on our classification
-        behavior_mode = "DIAGNOSTIC" if is_medical_scan else "GENERAL_WELLNESS"
+        # Only perform search if there is a clear intent to avoid 'Tired-to-Cancer' drift
+        embed_res = bedrock.invoke_model(
+            modelId="amazon.titan-embed-text-v2:0",
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps({"inputText": user_query if user_query else "medical inquiry"})
+        )
+        embedding = json.loads(embed_res['body'].read())['embedding']
         
-        final_prompt = (
-            f"MODE: {behavior_mode}\n"
-            f"CLINICAL GUIDELINES:\n{context_text}\n\n"
-            f"VISUAL OBSERVATION:\n{vision_text}\n\n"
-            f"USER QUESTION: {user_query}\n\n"
-            "INSTRUCTION: If MODE is GENERAL_WELLNESS, avoid terminal diagnoses like cancer or rare syndromes. "
-            "Focus on common causes like rest, hydration, or stress unless a scan is provided."
+        index = pc.Index("mediquery")
+        pc_res = index.query(
+            vector=embedding, 
+            top_k=2, 
+            filter=filter_logic, 
+            include_metadata=True
         )
         
+        # Only use context if it meets a strict similarity threshold
+        matches = [m['metadata']['text'] for m in pc_res['matches'] if m['score'] > 0.78]
+        if matches:
+            context_text = "\n\n".join(matches)
+
+        # --- PHASE 4: DYNAMIC PROMPTING ---
+        # We explicitly tell the brain what 'Mode' it is in
+        mode = "CLINICAL_DIAGNOSTIC" if is_heavy_query else "GENERAL_WELLNESS"
+        
+        final_prompt = (
+            f"MODE: {mode}\n"
+            f"CLINICAL CONTEXT:\n{context_text}\n\n"
+            f"VISUAL ANALYSIS:\n{vision_text}\n\n"
+            f"USER QUERY: {user_query}\n\n"
+            "INSTRUCTION: If MODE is GENERAL_WELLNESS, suggest common causes (rest, flu, stress). "
+            "DO NOT suggest terminal illnesses unless MODE is CLINICAL_DIAGNOSTIC."
+        )
+        
+        # --- PHASE 5: BRAIN INFERENCE (Modal) ---
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
         modal_res = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=120) 
         custom_answer = json.loads(modal_res.read()).get("diagnosis", "Error reading brain output.")
@@ -86,4 +98,8 @@ def handler(event, context):
         }
 
     except Exception as e:
-        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+            "body": json.dumps({"error": str(e)})
+        }
