@@ -22,15 +22,25 @@ def handler(event, context):
 
         # --- PHASE 1: NOVA DETAILED VISION ---
         if image_data:
-            messages = [{"role": "user", "content": [
-                {"image": {"format": image_format, "source": {"bytes": base64.b64decode(image_data)}}},
-                {"text": "Perform a highly detailed clinical visual analysis. Describe textures, colors, and any abnormalities in the skin, eyes, or anatomy shown. Be objective."}
-            ]}]
-            nova_res = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
-            vision_text = nova_res['output']['message']['content'][0]['text']
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"image": {"format": image_format, "source": {"bytes": base64.b64decode(image_data)}}},
+                    {
+                        "text": (
+                            "Identify if this is a medical scan (like an MRI, X-ray, or clinical close-up) "
+                            "or a general photo (like a person, scenery, or illustration). "
+                            "If it is a general photo, describe the subjects normally. "
+                            "If it is a medical scan, describe visible textures and anomalies. Do not diagnose."
+                        )
+                    }
+                ]
+            }]
+            nova_response = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
+            vision_text = nova_response['output']['message']['content'][0]['text']
 
         # --- PHASE 2: PINECONE RAG ---
-        search_query = f"{user_query} {vision_text}"
+        search_query = user_query if not image_data else f"{user_query} {vision_text}"
         embed_res = bedrock.invoke_model(
             modelId="amazon.titan-embed-text-v2:0",
             contentType="application/json",
