@@ -17,46 +17,32 @@ class MediQueryBrain:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import PeftModel
         import torch
-        
-        print("Loading Base Model...")
         self.tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-        base_model = AutoModelForCausalLM.from_pretrained(
-            BASE_MODEL, torch_dtype=torch.float16, device_map="auto"
-        )
-        print("Applying Medical Adapter...")
-        self.model = PeftModel.from_pretrained(base_model, ADAPTER_MODEL)
-        print("Brain ready.")
+        base = AutoModelForCausalLM.from_pretrained(BASE_MODEL, torch_dtype=torch.float16, device_map="auto")
+        self.model = PeftModel.from_pretrained(base, ADAPTER_MODEL)
 
     @modal.fastapi_endpoint(method="POST")
     def generate_diagnosis(self, data: dict):
         raw_prompt = data.get("prompt", "")
         
-        # --- THE HIGH-PRECISION CHAT TEMPLATE ---
-        # 1. Clear system role. 2. Proper stop tokens (</s>). 
-        # 3. Explicit "I don't know" instruction to prevent hallucinations.
-        formatted_prompt = (
-            "<|system|>\n"
-            "You are a medical assistant. Use the provided context tags to answer the question. "
-            "If the information is not in the context, say 'I do not have enough clinical data to answer that.'\n"
-            "</s>\n"
-            f"<|user|>\n{raw_prompt}</s>\n"
-            "<|assistant|>\n"
+        # --- THE COMMON SENSE SYSTEM PROMPT ---
+        system_instr = (
+            "You are a grounded medical assistant for general 'feel weird' inquiries. "
+            "1. Prioritize common conditions (cold, flu, allergies) for simple symptoms. "
+            "2. If the clinical guidelines provided seem too extreme for the symptoms, mention the common possibility first. "
+            "3. If an image is provided but isn't a medical scan, describe it simply and do not give a clinical diagnosis."
         )
 
+        formatted_prompt = f"<|system|>\n{system_instr}</s>\n<|user|>\n{raw_prompt}</s>\n<|assistant|>\n"
+
         inputs = self.tokenizer(formatted_prompt, return_tensors="pt").to("cuda")
-        
-        # FACTUAL SETTINGS: Lower temperature (0.2) + Repetition Penalty
         outputs = self.model.generate(
             **inputs, 
             max_new_tokens=300,
             do_sample=True,
-            temperature=0.2, 
-            top_p=0.9,
-            repetition_penalty=1.2
+            temperature=0.3, # Low temperature for factual consistency
+            repetition_penalty=1.2 # Stops the 'asda' looping
         )
         
         full_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # Extract only the assistant's answer
-        answer = full_text.split("<|assistant|>")[-1].strip() if "<|assistant|>" in full_text else full_text
-        
-        return {"diagnosis": answer}
+        return {"diagnosis": full_text.split("<|assistant|>")[-1].strip()}
