@@ -6,6 +6,7 @@ import urllib.request
 from pinecone import Pinecone
 
 # --- INITIALIZE CLOUD CLIENTS ---
+# These use the environment variables set in your Lambda configuration
 bedrock = boto3.client(service_name='bedrock-runtime', region_name=os.environ.get("MY_AWS_REGION", "us-east-1"))
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
@@ -15,8 +16,9 @@ MODAL_API_URL = "https://skund-kr--mediquery-custom-brain-mediquerybrain-generat
 def handler(event, context):
     try:
         # 1. Parse incoming payload from Streamlit
+        # CRITICAL FIX: Changed from .get("query") to .get("question") to match Streamlit
         body = json.loads(event.get("body", "{}"))
-        user_query = body.get("query", "")
+        user_query = body.get("question", "") 
         image_data = body.get("image", None)
         
         vision_text = ""
@@ -37,15 +39,15 @@ def handler(event, context):
         # --- PHASE 2: THE MEMORY (Titan + Pinecone) ---
         print("PHASE 2: Querying Pinecone...")
         
-        # Strip whitespace to prevent empty strings from crashing Titan
+        # Combine user text and vision text for the search
         search_query = user_query.strip()
         if vision_text:
             search_query += f" [Visual Context: {vision_text}]"
             
-        # BULLETPROOF FAILSAFE: If the query is completely empty, default to this
-        search_query = search_query.strip()
-        if not search_query:
-            search_query = "clinical medical guidelines"
+        # BULLETPROOF FAILSAFE: Titan crashes if string length is 0. 
+        # This ensures the 'minLength: 1' error never happens again.
+        if not search_query.strip():
+            search_query = "general clinical medical guidelines"
             
         embed_response = bedrock.invoke_model(
             modelId="amazon.titan-embed-text-v2:0",
@@ -65,6 +67,8 @@ def handler(event, context):
         
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
         modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=25) 
+        
+        # Get the diagnosis from your Modal brain
         custom_answer = json.loads(modal_response.read()).get("diagnosis", "Error reading custom brain output.")
 
         # --- RETURN ---
@@ -74,7 +78,8 @@ def handler(event, context):
                 "Content-Type": "application/json",
                 "Access-Control-Allow-Origin": "*"
             },
-            "body": json.dumps({"response": custom_answer})
+            # CRITICAL FIX: Changed key from "response" to "answer" to match Streamlit's st.write(data.get("answer"))
+            "body": json.dumps({"answer": custom_answer})
         }
 
     except Exception as e:
