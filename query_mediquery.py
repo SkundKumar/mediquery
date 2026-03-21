@@ -6,7 +6,6 @@ import urllib.request
 from pinecone import Pinecone
 
 # --- INITIALIZE CLOUD CLIENTS ---
-# These use the environment variables set in your Lambda configuration
 bedrock = boto3.client(service_name='bedrock-runtime', region_name=os.environ.get("MY_AWS_REGION", "us-east-1"))
 pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
 
@@ -16,7 +15,6 @@ MODAL_API_URL = "https://skund-kr--mediquery-custom-brain-mediquerybrain-generat
 def handler(event, context):
     try:
         # 1. Parse incoming payload from Streamlit
-        # CRITICAL FIX: Changed from .get("query") to .get("question") to match Streamlit
         body = json.loads(event.get("body", "{}"))
         user_query = body.get("question", "") 
         image_data = body.get("image", None)
@@ -25,12 +23,12 @@ def handler(event, context):
 
         # --- PHASE 1: THE EYES (Amazon Nova) ---
         if image_data:
-            print("PHASE 1: Extracting visual context with Nova Lite...")
+            print("PHASE 1: Extracting visual context...")
             messages = [{
                 "role": "user",
                 "content": [
                     {"image": {"format": "png", "source": {"bytes": base64.b64decode(image_data)}}},
-                    {"text": "You are a clinical data extractor. Describe every visual medical anomaly in this image in plain text. Do not diagnose. Just describe what you see."}
+                    {"text": "Describe the visual medical anomalies in this image. Do not diagnose."}
                 ]
             }]
             nova_response = bedrock.converse(modelId="amazon.nova-lite-v1:0", messages=messages)
@@ -38,14 +36,11 @@ def handler(event, context):
 
         # --- PHASE 2: THE MEMORY (Titan + Pinecone) ---
         print("PHASE 2: Querying Pinecone...")
-        
-        # Combine user text and vision text for the search
         search_query = user_query.strip()
         if vision_text:
             search_query += f" [Visual Context: {vision_text}]"
             
-        # BULLETPROOF FAILSAFE: Titan crashes if string length is 0. 
-        # This ensures the 'minLength: 1' error never happens again.
+        # TITAN FAILSAFE
         if not search_query.strip():
             search_query = "general clinical medical guidelines"
             
@@ -57,18 +52,20 @@ def handler(event, context):
         )
         embedding = json.loads(embed_response['body'].read())['embedding']
         
-        index = pc.Index("mediquery-index")
+        # --- FIXED PINECONE INDEX NAME ---
+        # Changed from "mediquery-index" to "mediquery" to match your dashboard
+        index = pc.Index("mediquery")
+        
         pc_response = index.query(vector=embedding, top_k=3, include_metadata=True)
         context_text = "\n".join([match['metadata']['text'] for match in pc_response['matches']])
 
         # --- PHASE 3: THE BRAIN (Modal GPU) ---
         print("PHASE 3: Routing data to Custom Modal Brain...")
-        final_prompt = f"Clinical Guidelines:\n{context_text}\n\nVisual Analysis:\n{vision_text}\n\nUser Question:\n{user_query}\n\nDiagnosis/Answer:"
+        final_prompt = f"Guidelines:\n{context_text}\n\nVisual Analysis:\n{vision_text}\n\nUser Question:\n{user_query}\n\nDiagnosis/Answer:"
         
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
         modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=25) 
         
-        # Get the diagnosis from your Modal brain
         custom_answer = json.loads(modal_response.read()).get("diagnosis", "Error reading custom brain output.")
 
         # --- RETURN ---
@@ -78,7 +75,7 @@ def handler(event, context):
                 "Content-Type": "application/json",
                 "Access-Control-Allow-Origin": "*"
             },
-            # CRITICAL FIX: Changed key from "response" to "answer" to match Streamlit's st.write(data.get("answer"))
+            # Matches st.write(data.get("answer"))
             "body": json.dumps({"answer": custom_answer})
         }
 
