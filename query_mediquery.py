@@ -40,7 +40,6 @@ def handler(event, context):
         if vision_text:
             search_query += f" [Visual Context: {vision_text}]"
             
-        # TITAN FAILSAFE
         if not search_query.strip():
             search_query = "general clinical medical guidelines"
             
@@ -52,8 +51,7 @@ def handler(event, context):
         )
         embedding = json.loads(embed_response['body'].read())['embedding']
         
-        # --- FIXED PINECONE INDEX NAME ---
-        # Changed from "mediquery-index" to "mediquery" to match your dashboard
+        # --- PINECONE INDEX NAME (MATCHES YOUR DASHBOARD) ---
         index = pc.Index("mediquery")
         
         pc_response = index.query(vector=embedding, top_k=3, include_metadata=True)
@@ -64,7 +62,9 @@ def handler(event, context):
         final_prompt = f"Guidelines:\n{context_text}\n\nVisual Analysis:\n{vision_text}\n\nUser Question:\n{user_query}\n\nDiagnosis/Answer:"
         
         req = urllib.request.Request(MODAL_API_URL, method="POST", headers={'Content-Type': 'application/json'})
-        modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=25) 
+        
+        # INCREASED TIMEOUT: From 25 to 60 seconds to handle GPU cold starts
+        modal_response = urllib.request.urlopen(req, data=json.dumps({"prompt": final_prompt}).encode('utf-8'), timeout=60) 
         
         custom_answer = json.loads(modal_response.read()).get("diagnosis", "Error reading custom brain output.")
 
@@ -75,7 +75,6 @@ def handler(event, context):
                 "Content-Type": "application/json",
                 "Access-Control-Allow-Origin": "*"
             },
-            # Matches st.write(data.get("answer"))
             "body": json.dumps({"answer": custom_answer})
         }
 
